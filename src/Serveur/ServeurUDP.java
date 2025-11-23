@@ -1,11 +1,12 @@
 package Serveur;
+
 import java.awt.image.BufferedImage;
 import javax.imageio.ImageIO;
 import java.io.ByteArrayInputStream;
-
-import javax.swing.*;
 import java.awt.*;
 import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.io.FileOutputStream;
 import java.io.IOException;
 import java.net.*;
 import java.nio.charset.StandardCharsets;
@@ -18,21 +19,22 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import javax.swing.*;
 
 public class ServeurUDP extends JFrame {
 
-	private final JPanel zoneAffichage = new JPanel(); // au lieu de JTextArea
-
+    private final JPanel zoneAffichage = new JPanel();
     private final Map<String, ClientInfo> clients = new ConcurrentHashMap<>();
     private final Map<String, Reassembly> reassemblies = new ConcurrentHashMap<>();
+    private final Map<String, ReassemblyFile> reassembliesFiles = new ConcurrentHashMap<>();
     private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
 
     public ServeurUDP() {
-        super("Serveur UDP – Chat + Images");
+        super("Serveur UDP – Chat + Images + Fichiers");
         zoneAffichage.setLayout(new BoxLayout(zoneAffichage, BoxLayout.Y_AXIS));
         JScrollPane scroll = new JScrollPane(zoneAffichage);
         add(scroll, BorderLayout.CENTER);
-        setSize(600, 420);
+        setSize(800, 500);
         setLocationRelativeTo(null);
         setDefaultCloseOperation(EXIT_ON_CLOSE);
         setVisible(true);
@@ -44,7 +46,7 @@ public class ServeurUDP extends JFrame {
     private void append(String s) {
         SwingUtilities.invokeLater(() -> {
             JLabel label = new JLabel(s);
-            label.setBorder(BorderFactory.createEmptyBorder(2,2,2,2));
+            label.setBorder(BorderFactory.createEmptyBorder(2, 2, 2, 2));
             zoneAffichage.add(label);
             zoneAffichage.revalidate();
             zoneAffichage.repaint();
@@ -83,9 +85,9 @@ public class ServeurUDP extends JFrame {
                     continue;
                 }
 
-                // Image reçue
-                if (data.length > 4 && data[0] == 'I' && data[1] == 'M' && data[2] == 'G' && data[3] == '|') {
-                    handleImagePacket(socket, client, data);
+                // Image ou fichier reçu
+                if (data.length > 4 && (new String(data, 0, 4).equals("IMG|") || new String(data, 0, 5).equals("FILE|"))) {
+                    handleDataPacket(socket, client, data);
                     continue;
                 }
 
@@ -124,9 +126,11 @@ public class ServeurUDP extends JFrame {
             scheduler.shutdownNow();
         }
     }
-    private void handleImagePacket(DatagramSocket socket, ClientInfo sender, byte[] data) {
+
+    private void handleDataPacket(DatagramSocket socket, ClientInfo sender, byte[] data) {
         try {
-            int idx = 4; // après "IMG|"
+            String headerType = new String(data, 0, Math.min(5, data.length), StandardCharsets.UTF_8).startsWith("FILE") ? "FILE" : "IMG";
+            int idx = headerType.equals("FILE") ? 5 : 4;
             String next = readNextField(data, data.length, idx);
             boolean isPrivate = false;
             String destName = null;
@@ -151,64 +155,111 @@ public class ServeurUDP extends JFrame {
             int total = Integer.parseInt(totalS);
             byte[] chunk = Arrays.copyOfRange(data, idx, data.length);
 
-            append("Image reçue frag " + (seq + 1) + "/" + total + " (" + filename + ")");
+            if (headerType.equals("IMG")) {
+                append("Image reçue frag " + (seq + 1) + "/" + total + " (" + filename + ")");
+                Reassembly re = reassemblies.computeIfAbsent(id, k -> new Reassembly(filename, total));
+                re.put(seq, chunk);
 
-            Reassembly re = reassemblies.computeIfAbsent(id, k -> new Reassembly(filename, total));
-            re.put(seq, chunk);
+                if (re.isComplete()) {
+                    byte[] fullImg = re.assemble();
+                    Path out = Paths.get("received_" + filename);
+                    Files.write(out, fullImg);
+                    append("Image complète sauvegardée : " + out.toAbsolutePath());
 
-            if (re.isComplete()) {
-                append("Image complète : " + filename);
-                byte[] fullImg = re.assemble();
-                Path out = Paths.get("received_" + filename);
-                Files.write(out, fullImg);
-                append("Image sauvegardée : " + out.toAbsolutePath());
+                    BufferedImage img = ImageIO.read(new ByteArrayInputStream(fullImg));
+                    if (img != null) {
+                        SwingUtilities.invokeLater(() -> {
+                            JPanel panelImage = new JPanel(new BorderLayout());
+                            panelImage.setBorder(BorderFactory.createLineBorder(Color.BLACK));
 
-                // ⚡ Affichage sur le serveur
-                BufferedImage img = ImageIO.read(new ByteArrayInputStream(fullImg));
-                if (img != null) {
-                    SwingUtilities.invokeLater(() -> {
-                        JPanel panelImage = new JPanel(new BorderLayout());
-                        panelImage.setBorder(BorderFactory.createLineBorder(Color.BLACK));
+                            JLabel label = new JLabel(new ImageIcon(img));
+                            JLabel labelNom = new JLabel(filename, JLabel.CENTER);
+                            labelNom.setFont(new Font("Arial", Font.BOLD, 12));
 
-                        JLabel label = new JLabel(new ImageIcon(img));
-                        JLabel labelNom = new JLabel(filename, JLabel.CENTER);
-                        labelNom.setFont(new Font("Arial", Font.BOLD, 12));
+                            panelImage.add(labelNom, BorderLayout.NORTH);
+                            panelImage.add(label, BorderLayout.CENTER);
 
-                        panelImage.add(labelNom, BorderLayout.NORTH);
-                        panelImage.add(label, BorderLayout.CENTER);
+                            zoneAffichage.add(panelImage);
+                            zoneAffichage.revalidate();
+                            zoneAffichage.repaint();
+                        });
+                    }
 
-                        zoneAffichage.add(panelImage);
-                        zoneAffichage.revalidate();
-                        zoneAffichage.repaint();
-                    });
+                    if (isPrivate && destName != null) {
+                        ClientInfo dest = clients.get(destName);
+                        if (dest != null) sendDataToClient(socket, id, filename, fullImg, "IMG", dest);
+                    } else {
+                        sendDataToAll(socket, id, filename, fullImg, "IMG");
+                    }
+
+                    reassemblies.remove(id);
                 }
+            } else { // FILE
+                append("Fichier reçu frag " + (seq + 1) + "/" + total + " (" + filename + ")");
+                ReassemblyFile re = reassembliesFiles.computeIfAbsent(id, k -> new ReassemblyFile(filename, total));
+                re.put(seq, chunk);
 
-                // ⚡ Transmission aux clients
-                if (isPrivate && destName != null) {
-                    ClientInfo dest = clients.get(destName);
-                    if (dest != null) sendImageToClient(socket, id, filename, fullImg, dest);
-                } else {
-                    sendImageToAll(socket, id, filename, fullImg);
+                if (re.isComplete()) {
+                    byte[] fullFile = re.assemble();
+                    Path out = Paths.get("received_" + filename);
+                    Files.write(out, fullFile);
+                    append("Fichier complet sauvegardé : " + out.toAbsolutePath());
+
+                    // ⚡ Crée un lien cliquable dans le serveur
+                    SwingUtilities.invokeLater(() -> ajouterLien(filename, fullFile));
+
+                    if (isPrivate && destName != null) {
+                        ClientInfo dest = clients.get(destName);
+                        if (dest != null) sendDataToClient(socket, id, filename, fullFile, "FILE", dest);
+                    } else {
+                        sendDataToAll(socket, id, filename, fullFile, "FILE");
+                    }
+
+                    reassembliesFiles.remove(id);
                 }
-
-                reassemblies.remove(id);
             }
 
         } catch (Exception e) {
-            append("Erreur image : " + e.getMessage());
+            append("Erreur réception données : " + e.getMessage());
             e.printStackTrace();
         }
     }
 
+    private void ajouterLien(String filename, byte[] fileBytes) {
+        JPanel panel = new JPanel(new BorderLayout());
+        panel.setBorder(BorderFactory.createLineBorder(Color.GRAY));
 
-    private void sendImageToClient(DatagramSocket socket, String id, String filename, byte[] imageBytes, ClientInfo dest) throws IOException {
+        JLabel link = new JLabel("<html><a href=''>" + filename + "</a></html>");
+        link.setFont(new Font("Arial", Font.BOLD, 12));
+        link.setCursor(new Cursor(Cursor.HAND_CURSOR));
+        link.addMouseListener(new java.awt.event.MouseAdapter() {
+            public void mouseClicked(java.awt.event.MouseEvent evt) {
+                try {
+                    File tempFile = new File(System.getProperty("java.io.tmpdir"), filename);
+                    try (FileOutputStream fos = new FileOutputStream(tempFile)) {
+                        fos.write(fileBytes);
+                    }
+                    Desktop.getDesktop().open(tempFile);
+                } catch (IOException ex) {
+                    append("Impossible d'ouvrir le fichier : " + ex.getMessage());
+                }
+            }
+        });
+
+        panel.add(link, BorderLayout.CENTER);
+        zoneAffichage.add(panel);
+        zoneAffichage.revalidate();
+        zoneAffichage.repaint();
+    }
+
+    private void sendDataToClient(DatagramSocket socket, String id, String filename, byte[] data, String type, ClientInfo dest) throws IOException {
         final int CHUNK = 60000;
-        int total = (imageBytes.length + CHUNK - 1) / CHUNK;
+        int total = (data.length + CHUNK - 1) / CHUNK;
         for (int seq = 0; seq < total; seq++) {
             int start = seq * CHUNK;
-            int end = Math.min(start + CHUNK, imageBytes.length);
-            byte[] part = Arrays.copyOfRange(imageBytes, start, end);
-            String header = "IMG|" + id + "|" + filename + "|" + seq + "|" + total + "|";
+            int end = Math.min(start + CHUNK, data.length);
+            byte[] part = Arrays.copyOfRange(data, start, end);
+            String header = type + "|" + id + "|" + filename + "|" + seq + "|" + total + "|";
             byte[] head = header.getBytes(StandardCharsets.UTF_8);
             byte[] send = new byte[head.length + part.length];
             System.arraycopy(head, 0, send, 0, head.length);
@@ -217,8 +268,8 @@ public class ServeurUDP extends JFrame {
         }
     }
 
-    private void sendImageToAll(DatagramSocket socket, String id, String filename, byte[] imageBytes) throws IOException {
-        for (ClientInfo c : clients.values()) sendImageToClient(socket, id, filename, imageBytes, c);
+    private void sendDataToAll(DatagramSocket socket, String id, String filename, byte[] data, String type) throws IOException {
+        for (ClientInfo c : clients.values()) sendDataToClient(socket, id, filename, data, type, c);
     }
 
     private String readNextField(byte[] data, int len, int idx) {
@@ -257,6 +308,7 @@ public class ServeurUDP extends JFrame {
     private void purgeOld() {
         long now = System.currentTimeMillis();
         reassemblies.entrySet().removeIf(e -> now - e.getValue().createdAt > 120_000);
+        reassembliesFiles.entrySet().removeIf(e -> now - e.getValue().createdAt > 120_000);
     }
 
     private static class ClientInfo {
@@ -276,11 +328,22 @@ public class ServeurUDP extends JFrame {
         boolean isComplete() { return parts.size() == total; }
         byte[] assemble() throws IOException {
             ByteArrayOutputStream out = new ByteArrayOutputStream();
-            for (int i = 0; i < total; i++) {
-                byte[] p = parts.get(i);
-                if (p == null) throw new IOException("Part manquante : " + i);
-                out.write(p);
-            }
+            for (int i = 0; i < total; i++) out.write(parts.get(i));
+            return out.toByteArray();
+        }
+    }
+
+    private static class ReassemblyFile {
+        final String filename;
+        final int total;
+        final Map<Integer, byte[]> parts = new ConcurrentHashMap<>();
+        final long createdAt = System.currentTimeMillis();
+        ReassemblyFile(String filename, int total) { this.filename = filename; this.total = total; }
+        void put(int seq, byte[] data) { parts.put(seq, data); }
+        boolean isComplete() { return parts.size() == total; }
+        byte[] assemble() throws IOException {
+            ByteArrayOutputStream out = new ByteArrayOutputStream();
+            for (int i = 0; i < total; i++) out.write(parts.get(i));
             return out.toByteArray();
         }
     }
