@@ -148,8 +148,11 @@ public class ClientUDP_GUI extends JFrame {
             envoyerBytes("IMG", fichier.getName(), imageBytes);
 
             final ImageIcon icon = new ImageIcon(img);
-            final String displayName = fichier.getName();
-            SwingUtilities.invokeLater(() -> ajouterImage(displayName, icon));
+            final String filename = fichier.getName();
+
+            // Affiche l'image avec le pseudo
+            SwingUtilities.invokeLater(() -> ajouterImage(pseudo, filename, icon));
+
             ajouterMessage("Envoi d'image : " + fichier.getName(), true);
         } catch (Exception e) {
             ajouterMessageErreur("Erreur envoi image : " + e.getMessage());
@@ -169,9 +172,9 @@ public class ClientUDP_GUI extends JFrame {
 
             envoyerBytes("FILE", fichier.getName(), fileBytes);
 
-            // Affiche un lien cliquable local
+            // Affiche un lien cliquable local avec le pseudo de l'expéditeur
             final String displayName = "<html><a href=''>" + fichier.getName() + "</a></html>";
-            SwingUtilities.invokeLater(() -> ajouterLien(displayName, fichier.getName(), fileBytes));
+            SwingUtilities.invokeLater(() -> ajouterLien(pseudo, displayName, fichier.getName(), fileBytes));
 
             ajouterMessage("Envoi fichier : " + fichier.getName(), true);
         } catch (Exception e) {
@@ -179,6 +182,7 @@ public class ClientUDP_GUI extends JFrame {
             e.printStackTrace();
         }
     }
+
 
     // Méthode commune pour envoyer image ou fichier
     private void envoyerBytes(String type, String filename, byte[] bytes) throws IOException {
@@ -252,8 +256,9 @@ public class ClientUDP_GUI extends JFrame {
             boolean isPrivate = false;
 
             if (parts.length > 1 && "DEST".equals(parts[1])) {
+                // Message privé
                 destPseudo = parts[2];
-                if (!pseudo.equals(destPseudo)) return;
+                if (!pseudo.equals(destPseudo)) return; // pas pour moi
 
                 id = parts[3];
                 filename = parts[4];
@@ -268,6 +273,7 @@ public class ClientUDP_GUI extends JFrame {
                     if (count == 7) break;
                 }
             } else {
+                // Message public
                 id = parts[1];
                 filename = parts[2];
                 seq = Integer.parseInt(parts[3]);
@@ -283,6 +289,9 @@ public class ClientUDP_GUI extends JFrame {
 
             byte[] partBytes = Arrays.copyOfRange(data, idxData, data.length);
 
+            // Récupérer le pseudo de l'expéditeur depuis l'ID
+            final String expediteur = id.split("_")[0];
+
             if (isFile) {
                 ReassemblyFile re = reassembliesFiles.computeIfAbsent(id, k -> new ReassemblyFile(total, filename));
                 if (re.parts.length != total) re.parts = new byte[total][];
@@ -293,8 +302,10 @@ public class ClientUDP_GUI extends JFrame {
                     ByteArrayOutputStream baos = new ByteArrayOutputStream();
                     for (byte[] p : re.parts) baos.write(p);
                     byte[] fileBytes = baos.toByteArray();
+
                     final String displayName = "<html><a href=''>" + filename + "</a></html>";
-                    SwingUtilities.invokeLater(() -> ajouterLien(displayName, filename, fileBytes));
+                    SwingUtilities.invokeLater(() -> ajouterLien(expediteur, displayName, filename, fileBytes));
+
                     reassembliesFiles.remove(id);
                 }
             } else {
@@ -309,7 +320,7 @@ public class ClientUDP_GUI extends JFrame {
                     for (byte[] p : re.parts) baos.write(p);
                     BufferedImage img = ImageIO.read(new ByteArrayInputStream(baos.toByteArray()));
                     if (img != null) {
-                        SwingUtilities.invokeLater(() -> ajouterImage(filename, new ImageIcon(img)));
+                        SwingUtilities.invokeLater(() -> ajouterImage(expediteur, filename, new ImageIcon(img)));
                     }
                     reassemblies.remove(id);
                 }
@@ -320,15 +331,68 @@ public class ClientUDP_GUI extends JFrame {
         }
     }
 
+
     // Ajouter un lien cliquable pour fichier
-    private void ajouterLien(String displayName, String filename, byte[] fileBytes) {
+    
+
+    private void ajouterMessage(String message, boolean estMoi) {
         JPanel panelMessage = new JPanel(new BorderLayout());
-        panelMessage.setBackground(new Color(245,245,245));
+        panelMessage.setBackground(estMoi ? new Color(220, 240, 255) : new Color(240, 240, 240));
+        panelMessage.setBorder(BorderFactory.createLineBorder(Color.LIGHT_GRAY));
+        JLabel label = new JLabel(message);
+        panelMessage.add(label, BorderLayout.CENTER);
+        panelChat.add(panelMessage);
+        panelChat.revalidate();
+        panelChat.repaint();
+    }
+
+ // Image avec pseudo
+ // Affichage image avec pseudo et nom du fichier
+    private void ajouterImage(String expediteur, String filename, ImageIcon icon) {
+        JPanel panelMessage = new JPanel();
+        panelMessage.setLayout(new BoxLayout(panelMessage, BoxLayout.Y_AXIS));
+        panelMessage.setBackground(new Color(245, 245, 245));
         panelMessage.setBorder(BorderFactory.createLineBorder(Color.GRAY));
+
+        JLabel labelPseudo = new JLabel(expediteur);
+        labelPseudo.setFont(new Font("Arial", Font.BOLD, 12));
+        labelPseudo.setAlignmentX(Component.LEFT_ALIGNMENT);
+
+        JLabel labelImage = new JLabel(icon);
+        labelImage.setBorder(BorderFactory.createLineBorder(Color.GRAY, 1));
+        labelImage.setAlignmentX(Component.LEFT_ALIGNMENT);
+
+        JLabel labelNomFichier = new JLabel(filename);
+        labelNomFichier.setFont(new Font("Arial", Font.PLAIN, 12));
+        labelNomFichier.setAlignmentX(Component.LEFT_ALIGNMENT);
+
+        panelMessage.add(labelPseudo);
+        panelMessage.add(Box.createVerticalStrut(5));
+        panelMessage.add(labelImage);
+        panelMessage.add(Box.createVerticalStrut(5));
+        panelMessage.add(labelNomFichier);
+
+        panelChat.add(panelMessage);
+        panelChat.add(Box.createVerticalStrut(10)); // espace entre messages
+        panelChat.revalidate();
+        panelChat.repaint();
+    }
+
+    // Affichage fichier avec pseudo et lien cliquable
+    private void ajouterLien(String expediteur, String displayName, String filename, byte[] fileBytes) {
+        JPanel panelMessage = new JPanel();
+        panelMessage.setLayout(new BoxLayout(panelMessage, BoxLayout.Y_AXIS));
+        panelMessage.setBackground(new Color(245, 245, 245));
+        panelMessage.setBorder(BorderFactory.createLineBorder(Color.GRAY));
+
+        JLabel labelPseudo = new JLabel(expediteur);
+        labelPseudo.setFont(new Font("Arial", Font.BOLD, 12));
+        labelPseudo.setAlignmentX(Component.LEFT_ALIGNMENT);
 
         JLabel link = new JLabel(displayName);
         link.setFont(new Font("Arial", Font.BOLD, 12));
         link.setCursor(new Cursor(Cursor.HAND_CURSOR));
+        link.setAlignmentX(Component.LEFT_ALIGNMENT);
         link.addMouseListener(new java.awt.event.MouseAdapter() {
             public void mouseClicked(java.awt.event.MouseEvent evt) {
                 try {
@@ -343,41 +407,17 @@ public class ClientUDP_GUI extends JFrame {
             }
         });
 
-        panelMessage.add(link, BorderLayout.CENTER);
+        panelMessage.add(labelPseudo);
+        panelMessage.add(Box.createVerticalStrut(5));
+        panelMessage.add(link);
+
         panelChat.add(panelMessage);
+        panelChat.add(Box.createVerticalStrut(10));
         panelChat.revalidate();
         panelChat.repaint();
     }
 
-    private void ajouterMessage(String message, boolean estMoi) {
-        JPanel panelMessage = new JPanel(new BorderLayout());
-        panelMessage.setBackground(estMoi ? new Color(220, 240, 255) : new Color(240, 240, 240));
-        panelMessage.setBorder(BorderFactory.createLineBorder(Color.LIGHT_GRAY));
-        JLabel label = new JLabel(message);
-        panelMessage.add(label, BorderLayout.CENTER);
-        panelChat.add(panelMessage);
-        panelChat.revalidate();
-        panelChat.repaint();
-    }
 
-    private void ajouterImage(String prefix, ImageIcon icon) {
-        JPanel panelMessage = new JPanel(new BorderLayout());
-        panelMessage.setBackground(new Color(245,245,245));
-        panelMessage.setBorder(BorderFactory.createLineBorder(Color.GRAY));
-
-        JLabel labelPseudo = new JLabel(prefix);
-        labelPseudo.setFont(new Font("Arial", Font.BOLD, 12));
-
-        JLabel labelImage = new JLabel(icon);
-        labelImage.setBorder(BorderFactory.createLineBorder(Color.GRAY, 1));
-
-        panelMessage.add(labelPseudo, BorderLayout.NORTH);
-        panelMessage.add(labelImage, BorderLayout.CENTER);
-
-        panelChat.add(panelMessage);
-        panelChat.revalidate();
-        panelChat.repaint();
-    }
 
     private void ajouterMessageErreur(String message) {
         JPanel panelMessage = new JPanel(new BorderLayout());
