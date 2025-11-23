@@ -144,48 +144,77 @@ public class ServeurUDP extends JFrame {
     private void handleImagePacket(DatagramSocket socket, ClientInfo sender, byte[] data, int len) {
         try {
             int idx = 4; // après "IMG|"
+            String next = readNextField(data, len, idx);
+            boolean isPrivate = false;
+            String destName = null;
 
-            String[] headerParts = new String(data, 0, len, StandardCharsets.UTF_8).split("\\|", 10);
-
-            String id, filename;
-            int seq, total;
-
-            if (headerParts[1].equals("DEST")) {
-                // paquet privé
-                id = headerParts[3];
-                filename = headerParts[4];
-                seq = Integer.parseInt(headerParts[5]);
-                total = Integer.parseInt(headerParts[6]);
-                idx = (headerParts[0] + "|" + headerParts[1] + "|" + headerParts[2] + "|" +
-                       headerParts[3] + "|" + headerParts[4] + "|" + headerParts[5] + "|" + headerParts[6] + "|").getBytes(StandardCharsets.UTF_8).length;
-            } else {
-                // paquet public
-                id = headerParts[1];
-                filename = headerParts[2];
-                seq = Integer.parseInt(headerParts[3]);
-                total = Integer.parseInt(headerParts[4]);
-                idx = (headerParts[0] + "|" + headerParts[1] + "|" + headerParts[2] + "|" +
-                       headerParts[3] + "|" + headerParts[4] + "|").getBytes(StandardCharsets.UTF_8).length;
+            if (next.equals("DEST")) {
+                isPrivate = true;
+                idx += next.getBytes(StandardCharsets.UTF_8).length + 1;
+                destName = readNextField(data, len, idx);
+                idx += destName.getBytes(StandardCharsets.UTF_8).length + 1;
             }
 
+            String id = readNextField(data, len, idx);
+            idx += id.getBytes(StandardCharsets.UTF_8).length + 1;
+            String filename = readNextField(data, len, idx);
+            idx += filename.getBytes(StandardCharsets.UTF_8).length + 1;
+            String seqS = readNextField(data, len, idx);
+            idx += seqS.getBytes(StandardCharsets.UTF_8).length + 1;
+            String totalS = readNextField(data, len, idx);
+            idx += totalS.getBytes(StandardCharsets.UTF_8).length + 1;
+
+            int seq = Integer.parseInt(seqS);
+            int total = Integer.parseInt(totalS);
             byte[] chunk = Arrays.copyOfRange(data, idx, len);
-            append("Image reçue : " + filename + " (" + (seq + 1) + "/" + total + ")");
+
+            append("Image reçue frag " + (seq + 1) + "/" + total + " (" + filename + ")");
 
             Reassembly re = reassemblies.computeIfAbsent(id, k -> new Reassembly(filename, total));
             re.put(seq, chunk);
 
             if (re.isComplete()) {
+                append("Image complète : " + filename);
                 byte[] fullImg = re.assemble();
                 Path out = Paths.get("received_" + filename);
                 Files.write(out, fullImg);
-                append("✔ Image complète sauvegardée : " + out.toAbsolutePath());
-                sendImageToAll(socket, id, filename, fullImg);
+                append("Image sauvegardée : " + out.toAbsolutePath());
+
+                // ⚡ ENVOI SELON PRIVÉ / PUBLIC
+                if (isPrivate && destName != null) {
+                    ClientInfo dest = clients.get(destName);
+                    if (dest != null) {
+                        sendImageToClient(socket, id, filename, fullImg, dest);
+                    } else {
+                        append("Utilisateur introuvable : " + destName);
+                    }
+                } else {
+                    sendImageToAll(socket, id, filename, fullImg);
+                }
+
                 reassemblies.remove(id);
             }
 
         } catch (Exception e) {
             append("Erreur image : " + e.getMessage());
             e.printStackTrace();
+        }
+    }
+    private void sendImageToClient(DatagramSocket socket, String id, String filename, byte[] imageBytes, ClientInfo dest) {
+        final int CHUNK = 60000;
+        int total = (imageBytes.length + CHUNK - 1) / CHUNK;
+        for (int seq = 0; seq < total; seq++) {
+            int start = seq * CHUNK;
+            int end = Math.min(start + CHUNK, imageBytes.length);
+            byte[] part = Arrays.copyOfRange(imageBytes, start, end);
+
+            String header = "IMG|" + id + "|" + filename + "|" + seq + "|" + total + "|";
+            byte[] head = header.getBytes(StandardCharsets.UTF_8);
+            byte[] send = new byte[head.length + part.length];
+            System.arraycopy(head, 0, send, 0, head.length);
+            System.arraycopy(part, 0, send, head.length, part.length);
+
+            sendBytes(socket, send, dest.adresse, dest.port);
         }
     }
 

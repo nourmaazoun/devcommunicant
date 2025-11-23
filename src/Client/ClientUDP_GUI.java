@@ -152,10 +152,10 @@ public class ClientUDP_GUI extends JFrame {
 
                 String header;
                 if (isPrivate) {
-                    // IMG|DEST|<dest>|<id>|<filename>|<seq>|<total>|
+                    // Format pour image privée : IMG|DEST|<dest>|<id>|<filename>|<seq>|<total>|
                     header = "IMG|DEST|" + destinataire + "|" + id + "|" + fichier.getName() + "|" + seq + "|" + total + "|";
                 } else {
-                    // IMG|<id>|<filename>|<seq>|<total>|
+                    // Format pour image publique : IMG|<id>|<filename>|<seq>|<total>|
                     header = "IMG|" + id + "|" + fichier.getName() + "|" + seq + "|" + total + "|";
                 }
 
@@ -169,11 +169,13 @@ public class ClientUDP_GUI extends JFrame {
             }
 
             ajouterMessage("Envoi d'image : " + fichier.getName() + (isPrivate ? " (privée à " + destinataire + ")" : ""), true);
+
         } catch (Exception e) {
             ajouterMessageErreur("Erreur envoi image : " + e.getMessage());
             e.printStackTrace();
         }
     }
+
 
     private void recevoir() {
         try {
@@ -207,29 +209,36 @@ public class ClientUDP_GUI extends JFrame {
 
     private void traiterImageRecue(byte[] data) {
         try {
-            // on lit jusqu'à 10 separateurs '|' pour récupérer les champs du header
+            // on lit jusqu'à 10 séparateurs '|' pour récupérer les champs du header
             String header = new String(data, 0, Math.min(data.length, 400), StandardCharsets.UTF_8);
             String[] parts = header.split("\\|");
 
             int startIdx;
-            String id, filename;
+            String id, filename, destPseudo = null;
             int seq, total;
+            boolean isPrivate = false;
 
             if (parts.length > 1 && "DEST".equals(parts[1])) {
                 // IMG|DEST|dest|id|filename|seq|total|...
                 if (parts.length < 7) return;
+
+                destPseudo = parts[2];
+                if (!pseudo.equals(destPseudo)) return; // Si ce n'est pas pour moi, ignorer
+
                 id = parts[3];
                 filename = parts[4];
                 seq = Integer.parseInt(parts[5]);
                 total = Integer.parseInt(parts[6]);
+                isPrivate = true;
 
-                // déterminer l'index octet où le header s'arrête (compter 7 séparateurs)
+                // index octet où le header s'arrête (compter 7 séparateurs)
                 int count = 0, idxData = 0;
                 for (int i = 0; i < data.length; i++) {
                     if (data[i] == '|') count++;
                     idxData = i + 1;
                     if (count == 7) break;
                 }
+
                 byte[] imgPart = Arrays.copyOfRange(data, idxData, data.length);
                 ReassemblyClient re = reassemblies.computeIfAbsent(id, k -> new ReassemblyClient(total));
                 if (re.parts.length != total) re.parts = new byte[total][];
@@ -240,7 +249,10 @@ public class ClientUDP_GUI extends JFrame {
                     ByteArrayOutputStream baos = new ByteArrayOutputStream();
                     for (byte[] p : re.parts) baos.write(p);
                     BufferedImage img = ImageIO.read(new ByteArrayInputStream(baos.toByteArray()));
-                    if (img != null) SwingUtilities.invokeLater(() -> ajouterImage(filename, new ImageIcon(img)));
+                    if (img != null) {
+                        final String displayName = "(privé) " + destPseudo + " : " + filename;
+                        SwingUtilities.invokeLater(() -> ajouterImage(displayName, new ImageIcon(img)));
+                    }
                     reassemblies.remove(id);
                 }
 
@@ -252,13 +264,14 @@ public class ClientUDP_GUI extends JFrame {
                 seq = Integer.parseInt(parts[3]);
                 total = Integer.parseInt(parts[4]);
 
-                // déterminer l'index octet où le header s'arrête (compter 5 séparateurs)
+                // index octet où le header s'arrête (compter 5 séparateurs)
                 int count = 0, idxData = 0;
                 for (int i = 0; i < data.length; i++) {
                     if (data[i] == '|') count++;
                     idxData = i + 1;
                     if (count == 5) break;
                 }
+
                 byte[] imgPart = Arrays.copyOfRange(data, idxData, data.length);
                 ReassemblyClient re = reassemblies.computeIfAbsent(id, k -> new ReassemblyClient(total));
                 if (re.parts.length != total) re.parts = new byte[total][];
@@ -269,7 +282,10 @@ public class ClientUDP_GUI extends JFrame {
                     ByteArrayOutputStream baos = new ByteArrayOutputStream();
                     for (byte[] p : re.parts) baos.write(p);
                     BufferedImage img = ImageIO.read(new ByteArrayInputStream(baos.toByteArray()));
-                    if (img != null) SwingUtilities.invokeLater(() -> ajouterImage(filename, new ImageIcon(img)));
+                    if (img != null) {
+                        final String displayName = filename;
+                        SwingUtilities.invokeLater(() -> ajouterImage(displayName, new ImageIcon(img)));
+                    }
                     reassemblies.remove(id);
                 }
             }
