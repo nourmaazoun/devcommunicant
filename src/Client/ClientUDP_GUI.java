@@ -152,10 +152,8 @@ public class ClientUDP_GUI extends JFrame {
 
                 String header;
                 if (isPrivate) {
-                    // Format pour image privée : IMG|DEST|<dest>|<id>|<filename>|<seq>|<total>|
                     header = "IMG|DEST|" + destinataire + "|" + id + "|" + fichier.getName() + "|" + seq + "|" + total + "|";
                 } else {
-                    // Format pour image publique : IMG|<id>|<filename>|<seq>|<total>|
                     header = "IMG|" + id + "|" + fichier.getName() + "|" + seq + "|" + total + "|";
                 }
 
@@ -167,6 +165,11 @@ public class ClientUDP_GUI extends JFrame {
                 DatagramPacket paquet = new DatagramPacket(data, data.length, serveurAdresse, portServeur);
                 socket.send(paquet);
             }
+
+            // ⚡ Affiche l'image dans le chat local UNE SEULE FOIS
+            final ImageIcon icon = new ImageIcon(img);
+            final String displayName = fichier.getName() + (isPrivate ? " (privée à " + destinataire + ")" : "");
+            SwingUtilities.invokeLater(() -> ajouterImage(displayName, icon));
 
             ajouterMessage("Envoi d'image : " + fichier.getName() + (isPrivate ? " (privée à " + destinataire + ")" : ""), true);
 

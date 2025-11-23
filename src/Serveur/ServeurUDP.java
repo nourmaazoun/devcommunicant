@@ -1,4 +1,7 @@
 package Serveur;
+import java.awt.image.BufferedImage;
+import javax.imageio.ImageIO;
+import java.io.ByteArrayInputStream;
 
 import javax.swing.*;
 import java.awt.*;
@@ -18,28 +21,34 @@ import java.util.concurrent.TimeUnit;
 
 public class ServeurUDP extends JFrame {
 
-    private final JTextArea zoneAffichage = new JTextArea();
+	private final JPanel zoneAffichage = new JPanel(); // au lieu de JTextArea
+
     private final Map<String, ClientInfo> clients = new ConcurrentHashMap<>();
     private final Map<String, Reassembly> reassemblies = new ConcurrentHashMap<>();
     private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
 
     public ServeurUDP() {
         super("Serveur UDP – Chat + Images");
-        zoneAffichage.setEditable(false);
-        add(new JScrollPane(zoneAffichage), BorderLayout.CENTER);
-
+        zoneAffichage.setLayout(new BoxLayout(zoneAffichage, BoxLayout.Y_AXIS));
+        JScrollPane scroll = new JScrollPane(zoneAffichage);
+        add(scroll, BorderLayout.CENTER);
         setSize(600, 420);
         setLocationRelativeTo(null);
         setDefaultCloseOperation(EXIT_ON_CLOSE);
         setVisible(true);
 
         scheduler.scheduleAtFixedRate(this::purgeOld, 60, 60, TimeUnit.SECONDS);
-
         new Thread(this::lancerServeur, "UDP-Server-Thread").start();
     }
 
     private void append(String s) {
-        SwingUtilities.invokeLater(() -> zoneAffichage.append(s + "\n"));
+        SwingUtilities.invokeLater(() -> {
+            JLabel label = new JLabel(s);
+            label.setBorder(BorderFactory.createEmptyBorder(2,2,2,2));
+            zoneAffichage.add(label);
+            zoneAffichage.revalidate();
+            zoneAffichage.repaint();
+        });
     }
 
     private void lancerServeur() {
@@ -56,21 +65,17 @@ public class ServeurUDP extends JFrame {
 
                 InetAddress addr = packet.getAddress();
                 int port = packet.getPort();
-                byte[] data = packet.getData();
-                int len = packet.getLength();
+                byte[] data = Arrays.copyOf(packet.getData(), packet.getLength());
 
                 ClientInfo client = findClientByAddress(addr, port);
 
-                // Nouveau client → premier message = pseudo (simple envoi du pseudo)
+                // Nouveau client → pseudo
                 if (client == null) {
-                    String pseudo = new String(data, 0, len, StandardCharsets.UTF_8).trim();
+                    String pseudo = new String(data, StandardCharsets.UTF_8).trim();
                     if (pseudo.isEmpty()) pseudo = "Client";
-                    // Si pseudo déjà utilisé, on ajoute suffixe pour éviter collision
                     String uniquePseudo = pseudo;
                     int i = 1;
-                    while (clients.containsKey(uniquePseudo)) {
-                        uniquePseudo = pseudo + "_" + i++;
-                    }
+                    while (clients.containsKey(uniquePseudo)) uniquePseudo = pseudo + "_" + i++;
                     client = new ClientInfo(addr, port, uniquePseudo);
                     clients.put(uniquePseudo, client);
                     append("Nouveau client connecté : " + uniquePseudo);
@@ -78,21 +83,19 @@ public class ServeurUDP extends JFrame {
                     continue;
                 }
 
-                // Image ?
-                if (len > 4 && data[0] == 'I' && data[1] == 'M' && data[2] == 'G' && data[3] == '|') {
-                    handleImagePacket(socket, client, data, len);
+                // Image reçue
+                if (data.length > 4 && data[0] == 'I' && data[1] == 'M' && data[2] == 'G' && data[3] == '|') {
+                    handleImagePacket(socket, client, data);
                     continue;
                 }
 
-                // Message texte selon protocole PUB|message ou PRIV|dest|message
-                String message = new String(data, 0, len, StandardCharsets.UTF_8);
+                // Message texte
+                String message = new String(data, StandardCharsets.UTF_8);
                 if (message.startsWith("PUB|")) {
                     String txt = message.substring(4);
                     append(client.pseudo + " : " + txt);
                     broadcastText(socket, client.pseudo + " : " + txt);
-                    continue;
                 } else if (message.startsWith("PRIV|")) {
-                    // format: PRIV|dest|texte
                     String[] parts = message.split("\\|", 3);
                     if (parts.length >= 3) {
                         String destName = parts[1];
@@ -107,30 +110,11 @@ public class ServeurUDP extends JFrame {
                             String err = "ERREUR|Utilisateur introuvable: " + destName;
                             sendBytes(socket, err.getBytes(StandardCharsets.UTF_8), client.adresse, client.port);
                         }
-                    } else {
-                        append("Format PRIV invalide de " + client.pseudo);
                     }
-                    continue;
+                } else {
+                    append(client.pseudo + " : " + message);
+                    broadcastText(socket, client.pseudo + " : " + message);
                 }
-
-                // Ancien format "@dest message" : compatibilité minimale
-                if (message.startsWith("@")) {
-                    int espace = message.indexOf(" ");
-                    if (espace != -1) {
-                        String destName = message.substring(1, espace);
-                        String txt = message.substring(espace + 1);
-                        ClientInfo dest = clients.get(destName);
-                        if (dest != null) {
-                            String finalMsg = "(Privé) " + client.pseudo + " : " + txt;
-                            sendBytes(socket, finalMsg.getBytes(StandardCharsets.UTF_8), dest.adresse, dest.port);
-                        } else append("Utilisateur introuvable : " + destName);
-                    }
-                    continue;
-                }
-
-                // Si rien de reconnu → broadcast texte brut
-                append(client.pseudo + " : " + message);
-                broadcastText(socket, client.pseudo + " : " + message);
             }
 
         } catch (Exception e) {
@@ -140,33 +124,32 @@ public class ServeurUDP extends JFrame {
             scheduler.shutdownNow();
         }
     }
-
-    private void handleImagePacket(DatagramSocket socket, ClientInfo sender, byte[] data, int len) {
+    private void handleImagePacket(DatagramSocket socket, ClientInfo sender, byte[] data) {
         try {
             int idx = 4; // après "IMG|"
-            String next = readNextField(data, len, idx);
+            String next = readNextField(data, data.length, idx);
             boolean isPrivate = false;
             String destName = null;
 
-            if (next.equals("DEST")) {
+            if ("DEST".equals(next)) {
                 isPrivate = true;
                 idx += next.getBytes(StandardCharsets.UTF_8).length + 1;
-                destName = readNextField(data, len, idx);
+                destName = readNextField(data, data.length, idx);
                 idx += destName.getBytes(StandardCharsets.UTF_8).length + 1;
             }
 
-            String id = readNextField(data, len, idx);
+            String id = readNextField(data, data.length, idx);
             idx += id.getBytes(StandardCharsets.UTF_8).length + 1;
-            String filename = readNextField(data, len, idx);
+            String filename = readNextField(data, data.length, idx);
             idx += filename.getBytes(StandardCharsets.UTF_8).length + 1;
-            String seqS = readNextField(data, len, idx);
+            String seqS = readNextField(data, data.length, idx);
             idx += seqS.getBytes(StandardCharsets.UTF_8).length + 1;
-            String totalS = readNextField(data, len, idx);
+            String totalS = readNextField(data, data.length, idx);
             idx += totalS.getBytes(StandardCharsets.UTF_8).length + 1;
 
             int seq = Integer.parseInt(seqS);
             int total = Integer.parseInt(totalS);
-            byte[] chunk = Arrays.copyOfRange(data, idx, len);
+            byte[] chunk = Arrays.copyOfRange(data, idx, data.length);
 
             append("Image reçue frag " + (seq + 1) + "/" + total + " (" + filename + ")");
 
@@ -180,14 +163,30 @@ public class ServeurUDP extends JFrame {
                 Files.write(out, fullImg);
                 append("Image sauvegardée : " + out.toAbsolutePath());
 
-                // ⚡ ENVOI SELON PRIVÉ / PUBLIC
+                // ⚡ Affichage sur le serveur
+                BufferedImage img = ImageIO.read(new ByteArrayInputStream(fullImg));
+                if (img != null) {
+                    SwingUtilities.invokeLater(() -> {
+                        JPanel panelImage = new JPanel(new BorderLayout());
+                        panelImage.setBorder(BorderFactory.createLineBorder(Color.BLACK));
+
+                        JLabel label = new JLabel(new ImageIcon(img));
+                        JLabel labelNom = new JLabel(filename, JLabel.CENTER);
+                        labelNom.setFont(new Font("Arial", Font.BOLD, 12));
+
+                        panelImage.add(labelNom, BorderLayout.NORTH);
+                        panelImage.add(label, BorderLayout.CENTER);
+
+                        zoneAffichage.add(panelImage);
+                        zoneAffichage.revalidate();
+                        zoneAffichage.repaint();
+                    });
+                }
+
+                // ⚡ Transmission aux clients
                 if (isPrivate && destName != null) {
                     ClientInfo dest = clients.get(destName);
-                    if (dest != null) {
-                        sendImageToClient(socket, id, filename, fullImg, dest);
-                    } else {
-                        append("Utilisateur introuvable : " + destName);
-                    }
+                    if (dest != null) sendImageToClient(socket, id, filename, fullImg, dest);
                 } else {
                     sendImageToAll(socket, id, filename, fullImg);
                 }
@@ -200,22 +199,26 @@ public class ServeurUDP extends JFrame {
             e.printStackTrace();
         }
     }
-    private void sendImageToClient(DatagramSocket socket, String id, String filename, byte[] imageBytes, ClientInfo dest) {
+
+
+    private void sendImageToClient(DatagramSocket socket, String id, String filename, byte[] imageBytes, ClientInfo dest) throws IOException {
         final int CHUNK = 60000;
         int total = (imageBytes.length + CHUNK - 1) / CHUNK;
         for (int seq = 0; seq < total; seq++) {
             int start = seq * CHUNK;
             int end = Math.min(start + CHUNK, imageBytes.length);
             byte[] part = Arrays.copyOfRange(imageBytes, start, end);
-
             String header = "IMG|" + id + "|" + filename + "|" + seq + "|" + total + "|";
             byte[] head = header.getBytes(StandardCharsets.UTF_8);
             byte[] send = new byte[head.length + part.length];
             System.arraycopy(head, 0, send, 0, head.length);
             System.arraycopy(part, 0, send, head.length, part.length);
-
             sendBytes(socket, send, dest.adresse, dest.port);
         }
+    }
+
+    private void sendImageToAll(DatagramSocket socket, String id, String filename, byte[] imageBytes) throws IOException {
+        for (ClientInfo c : clients.values()) sendImageToClient(socket, id, filename, imageBytes, c);
     }
 
     private String readNextField(byte[] data, int len, int idx) {
@@ -223,42 +226,6 @@ public class ServeurUDP extends JFrame {
         int i = idx;
         while (i < len && data[i] != '|') i++;
         return new String(data, idx, i - idx, StandardCharsets.UTF_8).trim();
-    }
-
-    private void sendImageToAll(DatagramSocket socket, String id, String filename, byte[] imageBytes) {
-        final int CHUNK = 60000;
-        int total = (imageBytes.length + CHUNK - 1) / CHUNK;
-        for (int seq = 0; seq < total; seq++) {
-            int start = seq * CHUNK;
-            int end = Math.min(start + CHUNK, imageBytes.length);
-            byte[] part = Arrays.copyOfRange(imageBytes, start, end);
-
-            String header = "IMG|" + id + "|" + filename + "|" + seq + "|" + total + "|";
-            byte[] head = header.getBytes(StandardCharsets.UTF_8);
-            byte[] send = new byte[head.length + part.length];
-            System.arraycopy(head, 0, send, 0, head.length);
-            System.arraycopy(part, 0, send, head.length, part.length);
-
-            for (ClientInfo c : clients.values()) sendBytes(socket, send, c.adresse, c.port);
-        }
-    }
-
-    private void sendImageTo(DatagramSocket socket, String id, String filename, byte[] imageBytes, InetAddress addr, int port) {
-        final int CHUNK = 60000;
-        int total = (imageBytes.length + CHUNK - 1) / CHUNK;
-        for (int seq = 0; seq < total; seq++) {
-            int start = seq * CHUNK;
-            int end = Math.min(start + CHUNK, imageBytes.length);
-            byte[] part = Arrays.copyOfRange(imageBytes, start, end);
-
-            String header = "IMG|" + id + "|" + filename + "|" + seq + "|" + total + "|";
-            byte[] head = header.getBytes(StandardCharsets.UTF_8);
-            byte[] send = new byte[head.length + part.length];
-            System.arraycopy(head, 0, send, 0, head.length);
-            System.arraycopy(part, 0, send, head.length, part.length);
-
-            sendBytes(socket, send, addr, port);
-        }
     }
 
     private void sendBytes(DatagramSocket socket, byte[] b, InetAddress addr, int port) {
@@ -270,7 +237,8 @@ public class ServeurUDP extends JFrame {
     }
 
     private ClientInfo findClientByAddress(InetAddress addr, int port) {
-        for (ClientInfo c : clients.values()) if (c.adresse.equals(addr) && c.port == port) return c;
+        for (ClientInfo c : clients.values())
+            if (c.adresse.equals(addr) && c.port == port) return c;
         return null;
     }
 
