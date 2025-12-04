@@ -363,19 +363,17 @@ public class ClientUDP_GUI extends JFrame {
     }
 
     private void ajouterLien(String expediteur, String displayName, String filename, byte[] fileBytes) {
-        JPanel panelMessage = new JPanel();
-        panelMessage.setLayout(new BoxLayout(panelMessage, BoxLayout.Y_AXIS));
-        panelMessage.setBackground(new Color(245, 245, 245));
-        panelMessage.setBorder(BorderFactory.createLineBorder(Color.GRAY));
+        JPanel panelMessage = new JPanel(new FlowLayout(FlowLayout.LEFT));
+        panelMessage.setBackground(Color.WHITE); // pas de gris
 
-        JLabel labelPseudo = new JLabel(expediteur);
+        JLabel labelPseudo = new JLabel(expediteur + " : ");
         labelPseudo.setFont(new Font("Arial", Font.BOLD, 12));
-        labelPseudo.setAlignmentX(Component.LEFT_ALIGNMENT);
 
+        // Lien cliquable pour ouvrir le fichier
         JLabel link = new JLabel(displayName);
-        link.setFont(new Font("Arial", Font.BOLD, 12));
+        link.setFont(new Font("Arial", Font.PLAIN, 12));
+        link.setForeground(Color.BLUE.darker());
         link.setCursor(new Cursor(Cursor.HAND_CURSOR));
-        link.setAlignmentX(Component.LEFT_ALIGNMENT);
         link.addMouseListener(new java.awt.event.MouseAdapter() {
             public void mouseClicked(java.awt.event.MouseEvent evt) {
                 try {
@@ -390,15 +388,49 @@ public class ClientUDP_GUI extends JFrame {
             }
         });
 
+        // Bouton Ouvrir
+        JButton btnOuvrir = new JButton("Ouvrir");
+        btnOuvrir.addActionListener(e -> {
+            try {
+                File tempFile = new File(System.getProperty("java.io.tmpdir"), filename);
+                try (FileOutputStream fos = new FileOutputStream(tempFile)) {
+                    fos.write(fileBytes);
+                }
+                Desktop.getDesktop().open(tempFile);
+            } catch (IOException ex) {
+                ajouterMessageErreur("Impossible d'ouvrir le fichier : " + ex.getMessage());
+            }
+        });
+
+        // Bouton Télécharger
+        JButton btnDownload = new JButton("Download");
+        btnDownload.addActionListener(e -> {
+            JFileChooser chooser = new JFileChooser();
+            chooser.setSelectedFile(new File(filename));
+            int res = chooser.showSaveDialog(null);
+            if (res == JFileChooser.APPROVE_OPTION) {
+                File saveFile = chooser.getSelectedFile();
+                try (FileOutputStream fos = new FileOutputStream(saveFile)) {
+                    fos.write(fileBytes);
+                    ajouterMessage("Fichier téléchargé : " + saveFile.getAbsolutePath(), true);
+                } catch (IOException ex) {
+                    ajouterMessageErreur("Erreur téléchargement : " + ex.getMessage());
+                }
+            }
+        });
+
+        // Ajouter les composants
         panelMessage.add(labelPseudo);
-        panelMessage.add(Box.createVerticalStrut(5));
         panelMessage.add(link);
+        panelMessage.add(btnOuvrir);
+        panelMessage.add(btnDownload);
 
         panelChat.add(panelMessage);
-        panelChat.add(Box.createVerticalStrut(10));
+        panelChat.add(Box.createVerticalStrut(5));
         panelChat.revalidate();
         panelChat.repaint();
     }
+
 
     private void ajouterMessageErreur(String message) {
         JPanel panelMessage = new JPanel(new BorderLayout());
