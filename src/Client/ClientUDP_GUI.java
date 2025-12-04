@@ -1,5 +1,4 @@
 package Client;
-
 import javax.swing.*;
 import java.awt.*;
 import java.io.*;
@@ -130,7 +129,6 @@ public class ClientUDP_GUI extends JFrame {
         }
     }
 
-    // Envoi image PNG
     private void envoyerImage() {
         try {
             JFileChooser chooser = new JFileChooser();
@@ -149,18 +147,14 @@ public class ClientUDP_GUI extends JFrame {
 
             final ImageIcon icon = new ImageIcon(img);
             final String filename = fichier.getName();
-
-            // Affiche l'image avec le pseudo
             SwingUtilities.invokeLater(() -> ajouterImage(pseudo, filename, icon));
 
             ajouterMessage("Envoi d'image : " + fichier.getName(), true);
         } catch (Exception e) {
             ajouterMessageErreur("Erreur envoi image : " + e.getMessage());
-            e.printStackTrace();
         }
     }
 
-    // Envoi fichier PDF
     private void envoyerFichier() {
         try {
             JFileChooser chooser = new JFileChooser();
@@ -172,19 +166,15 @@ public class ClientUDP_GUI extends JFrame {
 
             envoyerBytes("FILE", fichier.getName(), fileBytes);
 
-            // Affiche un lien cliquable local avec le pseudo de l'expéditeur
             final String displayName = "<html><a href=''>" + fichier.getName() + "</a></html>";
             SwingUtilities.invokeLater(() -> ajouterLien(pseudo, displayName, fichier.getName(), fileBytes));
 
             ajouterMessage("Envoi fichier : " + fichier.getName(), true);
         } catch (Exception e) {
             ajouterMessageErreur("Erreur envoi fichier : " + e.getMessage());
-            e.printStackTrace();
         }
     }
 
-
-    // Méthode commune pour envoyer image ou fichier
     private void envoyerBytes(String type, String filename, byte[] bytes) throws IOException {
         final int CHUNK = 60000;
         int total = (bytes.length + CHUNK - 1) / CHUNK;
@@ -237,14 +227,11 @@ public class ClientUDP_GUI extends JFrame {
                     SwingUtilities.invokeLater(() -> ajouterMessage(message, false));
                 }
             }
-        } catch (SocketTimeoutException ste) {
-            recevoir();
         } catch (Exception e) {
             SwingUtilities.invokeLater(() -> ajouterMessageErreur("Erreur réception : " + e.getMessage()));
         }
     }
 
-    // Traiter image ou fichier reçu
     private void traiterBytesRecus(byte[] data, boolean isFile) {
         try {
             String header = new String(data, 0, Math.min(data.length, 400), StandardCharsets.UTF_8);
@@ -253,18 +240,15 @@ public class ClientUDP_GUI extends JFrame {
             int idxData = 0;
             String id, filename, destPseudo = null;
             int seq, total;
-            boolean isPrivate = false;
 
             if (parts.length > 1 && "DEST".equals(parts[1])) {
-                // Message privé
                 destPseudo = parts[2];
-                if (!pseudo.equals(destPseudo)) return; // pas pour moi
+                if (!pseudo.equals(destPseudo)) return;
 
                 id = parts[3];
                 filename = parts[4];
                 seq = Integer.parseInt(parts[5]);
                 total = Integer.parseInt(parts[6]);
-                isPrivate = true;
 
                 int count = 0;
                 for (int i = 0; i < data.length; i++) {
@@ -273,7 +257,6 @@ public class ClientUDP_GUI extends JFrame {
                     if (count == 7) break;
                 }
             } else {
-                // Message public
                 id = parts[1];
                 filename = parts[2];
                 seq = Integer.parseInt(parts[3]);
@@ -289,8 +272,11 @@ public class ClientUDP_GUI extends JFrame {
 
             byte[] partBytes = Arrays.copyOfRange(data, idxData, data.length);
 
-            // Récupérer le pseudo de l'expéditeur depuis l'ID
+            // EXTRACTION EXPÉDITEUR
             final String expediteur = id.split("_")[0];
+
+            // 🔥🔥🔥 CORRECTION : éviter double affichage chez l’expéditeur 🔥🔥🔥
+            if (expediteur.equals(pseudo)) return;
 
             if (isFile) {
                 ReassemblyFile re = reassembliesFiles.computeIfAbsent(id, k -> new ReassemblyFile(total, filename));
@@ -305,11 +291,9 @@ public class ClientUDP_GUI extends JFrame {
 
                     final String displayName = "<html><a href=''>" + filename + "</a></html>";
                     SwingUtilities.invokeLater(() -> ajouterLien(expediteur, displayName, filename, fileBytes));
-
                     reassembliesFiles.remove(id);
                 }
             } else {
-                // traitement image PNG
                 ReassemblyClient re = reassemblies.computeIfAbsent(id, k -> new ReassemblyClient(total));
                 if (re.parts.length != total) re.parts = new byte[total][];
                 if (re.parts[seq] == null) re.received++;
@@ -331,23 +315,23 @@ public class ClientUDP_GUI extends JFrame {
         }
     }
 
-
-    // Ajouter un lien cliquable pour fichier
-    
-
     private void ajouterMessage(String message, boolean estMoi) {
-        JPanel panelMessage = new JPanel(new BorderLayout());
-        panelMessage.setBackground(estMoi ? new Color(220, 240, 255) : new Color(240, 240, 240));
-        panelMessage.setBorder(BorderFactory.createLineBorder(Color.LIGHT_GRAY));
+
+        // Un simple label, sans panneau, sans couleur de fond
         JLabel label = new JLabel(message);
-        panelMessage.add(label, BorderLayout.CENTER);
-        panelChat.add(panelMessage);
+        label.setFont(new Font("Arial", Font.PLAIN, 14));
+
+        // Alignement : à droite pour toi, à gauche pour les autres
+        label.setAlignmentX(estMoi ? Component.RIGHT_ALIGNMENT : Component.LEFT_ALIGNMENT);
+
+        panelChat.add(label);
+        panelChat.add(Box.createVerticalStrut(5)); // Petit espace entre les messages
+
         panelChat.revalidate();
         panelChat.repaint();
     }
 
- // Image avec pseudo
- // Affichage image avec pseudo et nom du fichier
+
     private void ajouterImage(String expediteur, String filename, ImageIcon icon) {
         JPanel panelMessage = new JPanel();
         panelMessage.setLayout(new BoxLayout(panelMessage, BoxLayout.Y_AXIS));
@@ -373,12 +357,11 @@ public class ClientUDP_GUI extends JFrame {
         panelMessage.add(labelNomFichier);
 
         panelChat.add(panelMessage);
-        panelChat.add(Box.createVerticalStrut(10)); // espace entre messages
+        panelChat.add(Box.createVerticalStrut(10));
         panelChat.revalidate();
         panelChat.repaint();
     }
 
-    // Affichage fichier avec pseudo et lien cliquable
     private void ajouterLien(String expediteur, String displayName, String filename, byte[] fileBytes) {
         JPanel panelMessage = new JPanel();
         panelMessage.setLayout(new BoxLayout(panelMessage, BoxLayout.Y_AXIS));
@@ -416,8 +399,6 @@ public class ClientUDP_GUI extends JFrame {
         panelChat.revalidate();
         panelChat.repaint();
     }
-
-
 
     private void ajouterMessageErreur(String message) {
         JPanel panelMessage = new JPanel(new BorderLayout());
