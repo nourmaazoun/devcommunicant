@@ -8,12 +8,18 @@ import java.util.Arrays;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.Map;
 import javax.imageio.ImageIO;
+import javax.sound.sampled.AudioFormat;
+import javax.sound.sampled.AudioInputStream;
+import javax.sound.sampled.AudioSystem;
+import javax.sound.sampled.Clip;
+import javax.sound.sampled.DataLine;
+import javax.sound.sampled.TargetDataLine;
+
 import java.awt.image.BufferedImage;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.nio.file.Files;
-
 public class ClientUDP_GUI extends JFrame {
 
     private JPanel panelChat;
@@ -28,8 +34,12 @@ public class ClientUDP_GUI extends JFrame {
     private int portServeur = 5000;
     private String pseudo;
 
-    private final Map<String, ReassemblyClient> reassemblies = new ConcurrentHashMap<>();
-    private final Map<String, ReassemblyFile> reassembliesFiles = new ConcurrentHashMap<>();
+    private final Map<String, ReassemblyData> reassembliesData = new ConcurrentHashMap<>();
+
+ // === AUDIO ===
+    private boolean recording = false;
+    private ByteArrayOutputStream audioBuffer;
+    private TargetDataLine microphone;
 
     public ClientUDP_GUI() {
         super("Client UDP – Chat");
@@ -58,6 +68,10 @@ public class ClientUDP_GUI extends JFrame {
         btnEnvoyer = new JButton("Envoyer");
         btnEnvoyerImage = new JButton("📷 Image");
         btnEnvoyerFichier = new JButton("📎 Fichier");
+        JButton btnStartAudio = new JButton("🎤 Start");
+        JButton btnStopAudio = new JButton("⏹ Stop");
+        btnStopAudio.setEnabled(false);
+
 
         modelClients = new DefaultListModel<>();
         listeClients = new JList<>(modelClients);
@@ -71,6 +85,9 @@ public class ClientUDP_GUI extends JFrame {
         panelBoutons.add(btnEnvoyer);
         panelBoutons.add(btnEnvoyerImage);
         panelBoutons.add(btnEnvoyerFichier);
+        panelBoutons.add(btnStartAudio);
+        panelBoutons.add(btnStopAudio);
+
 
         JPanel bas = new JPanel(new BorderLayout());
         bas.add(champMessage, BorderLayout.CENTER);
@@ -84,6 +101,18 @@ public class ClientUDP_GUI extends JFrame {
         champMessage.addActionListener(e -> envoyer());
         btnEnvoyerImage.addActionListener(e -> envoyerImage());
         btnEnvoyerFichier.addActionListener(e -> envoyerFichier());
+        btnStartAudio.addActionListener(e -> {
+            btnStartAudio.setEnabled(false);
+            btnStopAudio.setEnabled(true);
+            startRecording();
+        });
+
+        btnStopAudio.addActionListener(e -> {
+            btnStopAudio.setEnabled(false);
+            btnStartAudio.setEnabled(true);
+            stopRecording();
+        });
+
 
         new Thread(this::recevoir).start();
 
@@ -93,6 +122,55 @@ public class ClientUDP_GUI extends JFrame {
         setVisible(true);
 
         envoyerPseudo();
+    } private void startRecording() {
+        try {
+            AudioFormat format = new AudioFormat(16000, 16, 1, true, false);
+            DataLine.Info info = new DataLine.Info(TargetDataLine.class, format);
+
+            microphone = (TargetDataLine) AudioSystem.getLine(info);
+            microphone.open(format);
+            microphone.start();
+
+            audioBuffer = new ByteArrayOutputStream();
+            recording = true;
+
+            new Thread(() -> {
+                byte[] buffer = new byte[4096];
+                while (recording) {
+                    int bytesRead = microphone.read(buffer, 0, buffer.length);
+                    audioBuffer.write(buffer, 0, bytesRead);
+                }
+            }).start();
+
+        } catch (Exception e) {
+            ajouterMessageErreur("Erreur enregistrement audio : " + e.getMessage());
+        }
+    }
+    private void stopRecording() {
+        try {
+            recording = false;
+            microphone.stop();
+            microphone.close();
+
+            byte[] audioBytes = audioBuffer.toByteArray();
+
+            // Créer un AudioInputStream à partir des bytes
+            ByteArrayInputStream bais = new ByteArrayInputStream(audioBytes);
+            AudioFormat format = new AudioFormat(16000, 16, 1, true, false);
+            AudioInputStream ais = new AudioInputStream(bais, format, audioBytes.length / format.getFrameSize());
+
+            // Écrire le vrai fichier WAV dans un ByteArrayOutputStream
+            ByteArrayOutputStream baos = new ByteArrayOutputStream();
+            AudioSystem.write(ais, javax.sound.sampled.AudioFileFormat.Type.WAVE, baos);
+
+            // Envoyer les bytes corrects
+            envoyerBytes("AUDIO", "audio.wav", baos.toByteArray());
+
+            ajouterMessage("🎤 Audio envoyé", true);
+
+        } catch (Exception e) {
+            ajouterMessageErreur("Erreur arrêt audio : " + e.getMessage());
+        }
     }
 
     private void envoyerPseudo() {
@@ -214,7 +292,8 @@ public class ClientUDP_GUI extends JFrame {
                 byte[] data = Arrays.copyOf(rep.getData(), rep.getLength());
                 String headerStr = new String(data, 0, Math.min(200, data.length), StandardCharsets.UTF_8);
 
-                if (headerStr.startsWith("IMG|") || headerStr.startsWith("FILE|")) {
+                if (headerStr.startsWith("IMG|") || headerStr.startsWith("FILE|") || headerStr.startsWith("AUDIO|")) {
+
                     traiterBytesRecus(data, headerStr.startsWith("FILE|"));
                 } else if (headerStr.startsWith("#LISTE#")) {
                     String[] pseudos = headerStr.substring(7).split(",");
@@ -278,39 +357,40 @@ public class ClientUDP_GUI extends JFrame {
             // 🔥🔥🔥 CORRECTION : éviter double affichage chez l’expéditeur 🔥🔥🔥
             if (expediteur.equals(pseudo)) return;
 
-            if (isFile) {
-                ReassemblyFile re = reassembliesFiles.computeIfAbsent(id, k -> new ReassemblyFile(total, filename));
-                if (re.parts.length != total) re.parts = new byte[total][];
-                if (re.parts[seq] == null) re.received++;
-                re.parts[seq] = partBytes;
+         // Créer ou récupérer l'objet ReassemblyData
+            ReassemblyData re = reassembliesData.computeIfAbsent(id, k -> new ReassemblyData(total, filename,
+                    header.startsWith("AUDIO|") ? "AUDIO" : (isFile ? "FILE" : "IMG")));
 
-                if (re.received == total) {
-                    ByteArrayOutputStream baos = new ByteArrayOutputStream();
-                    for (byte[] p : re.parts) baos.write(p);
-                    byte[] fileBytes = baos.toByteArray();
+            // Ajouter la partie
+            if (re.parts[seq] == null) re.received++;
+            re.parts[seq] = partBytes;
 
-                    final String displayName = "<html><a href=''>" + filename + "</a></html>";
-                    SwingUtilities.invokeLater(() -> ajouterLien(expediteur, displayName, filename, fileBytes));
-                    reassembliesFiles.remove(id);
+            // Si toutes les parties reçues
+            if (re.received == total) {
+                ByteArrayOutputStream baos = new ByteArrayOutputStream();
+                for (byte[] p : re.parts) if (p != null) baos.write(p);
+                byte[] fullBytes = baos.toByteArray();
+
+                switch (re.type) {
+                    case "IMG":
+                        BufferedImage img = ImageIO.read(new ByteArrayInputStream(fullBytes));
+                        if (img != null)
+                            SwingUtilities.invokeLater(() -> ajouterImage(expediteur, filename, new ImageIcon(img)));
+                        break;
+                    case "FILE":
+                        SwingUtilities.invokeLater(() -> ajouterLien(expediteur, "<html><a href=''>" + filename + "</a></html>", filename, fullBytes));
+                        break;
+                    case "AUDIO":
+                        SwingUtilities.invokeLater(() -> ajouterAudio(expediteur, filename, fullBytes));
+                        break;
                 }
-            } else {
-                ReassemblyClient re = reassemblies.computeIfAbsent(id, k -> new ReassemblyClient(total));
-                if (re.parts.length != total) re.parts = new byte[total][];
-                if (re.parts[seq] == null) re.received++;
-                re.parts[seq] = partBytes;
 
-                if (re.received == total) {
-                    ByteArrayOutputStream baos = new ByteArrayOutputStream();
-                    for (byte[] p : re.parts) baos.write(p);
-                    BufferedImage img = ImageIO.read(new ByteArrayInputStream(baos.toByteArray()));
-                    if (img != null) {
-                        SwingUtilities.invokeLater(() -> ajouterImage(expediteur, filename, new ImageIcon(img)));
-                    }
-                    reassemblies.remove(id);
-                }
+                reassembliesData.remove(id);
             }
 
-        } catch (Exception e) {
+           }
+
+            catch (Exception e) {
             e.printStackTrace();
         }
     }
@@ -430,6 +510,40 @@ public class ClientUDP_GUI extends JFrame {
         panelChat.revalidate();
         panelChat.repaint();
     }
+   
+    private void ajouterAudio(String expediteur, String filename, byte[] audioBytes) {
+        JPanel panelMessage = new JPanel(new FlowLayout(FlowLayout.LEFT));
+        panelMessage.setBackground(Color.WHITE);
+
+        JLabel labelPseudo = new JLabel(expediteur + " : ");
+        labelPseudo.setFont(new Font("Arial", Font.BOLD, 12));
+
+        JButton btnPlay = new JButton("▶ Écouter");
+        btnPlay.addActionListener(e -> {
+            try {
+                File temp = new File(System.getProperty("java.io.tmpdir"), filename);
+                FileOutputStream fos = new FileOutputStream(temp);
+                fos.write(audioBytes);
+                fos.close();
+
+                AudioInputStream ais = AudioSystem.getAudioInputStream(temp);
+                Clip clip = AudioSystem.getClip();
+                clip.open(ais);
+                clip.start();
+
+            } catch (Exception ex) {
+                ajouterMessageErreur("Impossible de lire : " + ex.getMessage());
+            }
+        });
+
+        panelMessage.add(labelPseudo);
+        panelMessage.add(btnPlay);
+
+        panelChat.add(panelMessage);
+        panelChat.add(Box.createVerticalStrut(5));
+        panelChat.revalidate();
+        panelChat.repaint();
+    }
 
 
     private void ajouterMessageErreur(String message) {
@@ -448,19 +562,17 @@ public class ClientUDP_GUI extends JFrame {
         SwingUtilities.invokeLater(ClientUDP_GUI::new);
     }
 
-    private static class ReassemblyClient {
-        byte[][] parts;
-        int received = 0;
-        public ReassemblyClient(int total) { parts = new byte[total][]; }
-    }
-
-    private static class ReassemblyFile {
+   
+    private static class ReassemblyData {
         byte[][] parts;
         int received = 0;
         String filename;
-        public ReassemblyFile(int total, String filename) {
+        String type; // "IMG", "FILE", "AUDIO"
+        public ReassemblyData(int total, String filename, String type) {
             parts = new byte[total][];
             this.filename = filename;
+            this.type = type;
         }
     }
+
 }

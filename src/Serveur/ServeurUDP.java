@@ -30,7 +30,7 @@ public class ServeurUDP extends JFrame {
     private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
 
     public ServeurUDP() {
-        super("Serveur UDP – Chat + Images + Fichiers");
+        super("Serveur UDP – Chat + Images + Fichiers + Audio");
         zoneAffichage.setLayout(new BoxLayout(zoneAffichage, BoxLayout.Y_AXIS));
         JScrollPane scroll = new JScrollPane(zoneAffichage);
         add(scroll, BorderLayout.CENTER);
@@ -71,7 +71,7 @@ public class ServeurUDP extends JFrame {
 
                 ClientInfo client = findClientByAddress(addr, port);
 
-                // Nouveau client → pseudo
+                // Nouveau client → pseudo (message initial)
                 if (client == null) {
                     String pseudo = new String(data, StandardCharsets.UTF_8).trim();
                     if (pseudo.isEmpty()) pseudo = "Client";
@@ -85,8 +85,9 @@ public class ServeurUDP extends JFrame {
                     continue;
                 }
 
-                // Image ou fichier reçu
-                if (data.length > 4 && (new String(data, 0, 4).equals("IMG|") || new String(data, 0, 5).equals("FILE|"))) {
+                // Détecter TYPE (IMG|FILE|AUDIO) — on lit d'abord le préfix
+                String prefix = new String(data, 0, Math.min(6, data.length), StandardCharsets.UTF_8);
+                if (prefix.startsWith("IMG|") || prefix.startsWith("FILE|") || prefix.startsWith("AUDIO|")) {
                     handleDataPacket(socket, client, data);
                     continue;
                 }
@@ -129,27 +130,43 @@ public class ServeurUDP extends JFrame {
 
     private void handleDataPacket(DatagramSocket socket, ClientInfo sender, byte[] data) {
         try {
-            String headerType = new String(data, 0, Math.min(5, data.length), StandardCharsets.UTF_8).startsWith("FILE") ? "FILE" : "IMG";
-            int idx = headerType.equals("FILE") ? 5 : 4;
-            String next = readNextField(data, data.length, idx);
+            // Determine type by reading prefix
+            String possible = new String(data, 0, Math.min(7, data.length), StandardCharsets.UTF_8);
+            String headerType;
+            if (possible.startsWith("FILE|")) headerType = "FILE";
+            else if (possible.startsWith("AUDIO|")) headerType = "AUDIO";
+            else headerType = "IMG"; // default
+
+            int idx = headerType.equals("FILE") ? 5 : headerType.equals("AUDIO") ? 6 : 4; // positions after "FILE|" "AUDIO|" "IMG|"
+
+            // read fields using robust helper that returns next index
+            FieldResult fr = readNextField(data, data.length, idx);
+            String next = fr.field;
+            idx = fr.nextIdx;
+
             boolean isPrivate = false;
             String destName = null;
 
             if ("DEST".equals(next)) {
                 isPrivate = true;
-                idx += next.getBytes(StandardCharsets.UTF_8).length + 1;
-                destName = readNextField(data, data.length, idx);
-                idx += destName.getBytes(StandardCharsets.UTF_8).length + 1;
+                fr = readNextField(data, data.length, idx);
+                destName = fr.field;
+                idx = fr.nextIdx;
+                // then read id...
+                fr = readNextField(data, data.length, idx);
             }
 
-            String id = readNextField(data, data.length, idx);
-            idx += id.getBytes(StandardCharsets.UTF_8).length + 1;
-            String filename = readNextField(data, data.length, idx);
-            idx += filename.getBytes(StandardCharsets.UTF_8).length + 1;
-            String seqS = readNextField(data, data.length, idx);
-            idx += seqS.getBytes(StandardCharsets.UTF_8).length + 1;
-            String totalS = readNextField(data, data.length, idx);
-            idx += totalS.getBytes(StandardCharsets.UTF_8).length + 1;
+            String id = fr.field;
+            idx = fr.nextIdx;
+            fr = readNextField(data, data.length, idx);
+            String filename = fr.field;
+            idx = fr.nextIdx;
+            fr = readNextField(data, data.length, idx);
+            String seqS = fr.field;
+            idx = fr.nextIdx;
+            fr = readNextField(data, data.length, idx);
+            String totalS = fr.field;
+            idx = fr.nextIdx;
 
             int seq = Integer.parseInt(seqS);
             int total = Integer.parseInt(totalS);
@@ -185,6 +202,7 @@ public class ServeurUDP extends JFrame {
                         });
                     }
 
+                    // send reassembled to destination(s)
                     if (isPrivate && destName != null) {
                         ClientInfo dest = clients.get(destName);
                         if (dest != null) sendDataToClient(socket, id, filename, fullImg, "IMG", dest);
@@ -194,8 +212,8 @@ public class ServeurUDP extends JFrame {
 
                     reassemblies.remove(id);
                 }
-            } else { // FILE
-                append("Fichier reçu frag " + (seq + 1) + "/" + total + " (" + filename + ")");
+            } else { // FILE or AUDIO
+                append((headerType.equals("AUDIO") ? "Audio" : "Fichier") + " reçu frag " + (seq + 1) + "/" + total + " (" + filename + ")");
                 ReassemblyFile re = reassembliesFiles.computeIfAbsent(id, k -> new ReassemblyFile(filename, total));
                 re.put(seq, chunk);
 
@@ -203,16 +221,16 @@ public class ServeurUDP extends JFrame {
                     byte[] fullFile = re.assemble();
                     Path out = Paths.get("received_" + filename);
                     Files.write(out, fullFile);
-                    append("Fichier complet sauvegardé : " + out.toAbsolutePath());
+                    append((headerType.equals("AUDIO") ? "Audio" : "Fichier") + " complet sauvegardé : " + out.toAbsolutePath());
 
-                    // ⚡ Crée un lien cliquable dans le serveur
+                    // affichage / bouton utile côté serveur
                     SwingUtilities.invokeLater(() -> ajouterLien(filename, fullFile));
 
                     if (isPrivate && destName != null) {
                         ClientInfo dest = clients.get(destName);
-                        if (dest != null) sendDataToClient(socket, id, filename, fullFile, "FILE", dest);
+                        if (dest != null) sendDataToClient(socket, id, filename, fullFile, headerType, dest);
                     } else {
-                        sendDataToAll(socket, id, filename, fullFile, "FILE");
+                        sendDataToAll(socket, id, filename, fullFile, headerType);
                     }
 
                     reassembliesFiles.remove(id);
@@ -272,11 +290,14 @@ public class ServeurUDP extends JFrame {
         for (ClientInfo c : clients.values()) sendDataToClient(socket, id, filename, data, type, c);
     }
 
-    private String readNextField(byte[] data, int len, int idx) {
-        if (idx >= len) return "";
+    // Helper returns both field and next index
+    private FieldResult readNextField(byte[] data, int len, int idx) {
+        if (idx >= len) return new FieldResult("", len);
         int i = idx;
         while (i < len && data[i] != '|') i++;
-        return new String(data, idx, i - idx, StandardCharsets.UTF_8).trim();
+        String field = new String(data, idx, i - idx, StandardCharsets.UTF_8).trim();
+        int nextIdx = (i < len && data[i] == '|') ? (i + 1) : i;
+        return new FieldResult(field, nextIdx);
     }
 
     private void sendBytes(DatagramSocket socket, byte[] b, InetAddress addr, int port) {
@@ -328,7 +349,11 @@ public class ServeurUDP extends JFrame {
         boolean isComplete() { return parts.size() == total; }
         byte[] assemble() throws IOException {
             ByteArrayOutputStream out = new ByteArrayOutputStream();
-            for (int i = 0; i < total; i++) out.write(parts.get(i));
+            for (int i = 0; i < total; i++) {
+                byte[] p = parts.get(i);
+                if (p == null) throw new IOException("Fragment manquant: " + i + " pour " + filename);
+                out.write(p);
+            }
             return out.toByteArray();
         }
     }
@@ -343,9 +368,20 @@ public class ServeurUDP extends JFrame {
         boolean isComplete() { return parts.size() == total; }
         byte[] assemble() throws IOException {
             ByteArrayOutputStream out = new ByteArrayOutputStream();
-            for (int i = 0; i < total; i++) out.write(parts.get(i));
+            for (int i = 0; i < total; i++) {
+                byte[] p = parts.get(i);
+                if (p == null) throw new IOException("Fragment manquant: " + i + " pour " + filename);
+                out.write(p);
+            }
             return out.toByteArray();
         }
+    }
+
+    // Small helper to return field + next index
+    private static class FieldResult {
+        final String field;
+        final int nextIdx;
+        FieldResult(String f, int n) { this.field = f; this.nextIdx = n; }
     }
 
     public static void main(String[] args) {
